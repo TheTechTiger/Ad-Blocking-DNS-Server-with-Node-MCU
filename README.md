@@ -34,18 +34,18 @@ This project implements an ad-blocking DNS server using Node MCU (ESP8266) micro
 1. Clone or download the project repository.
 2. Open the project in Arduino IDE or PlatformIO.
 3. Install the required libraries if not already installed.
-4. Connect the Node MCU board to your computer via USB.
-5. Select the appropriate board and port in the Arduino IDE.
-6. Upload the sketch to the Node MCU board.
+4. Specify in the WiFi network to be connected to in the code(Replace `SSID` and `PASS` with your credentials)
+5. Connect the Node MCU board to your computer via USB.
+6. Select the appropriate board and port in the Arduino IDE.
+7. Upload the sketch to the Node MCU board.
 
 ### Usage
 
 1. Power on the Node MCU board.
-2. Specify in the WiFi network to be connected to in the code.
-3. Monitor the serial output for debugging information (`74880` baud rate).
-4. The built-in LED indicates the device's status: ON when connected, OFF when disconnected.
-5. Send DNS queries to the IP address of the Node MCU board.
-6. Monitor the serial output for DNS query processing details.
+2. Monitor the serial output for debugging information (`74880` baud rate).
+3. The built-in LED indicates the device's status: ON when connected, OFF when disconnected.
+4. Send DNS queries to the IP address of the Node MCU board.
+5. Monitor the serial output for DNS query processing details.
 
 ## Customization
 
