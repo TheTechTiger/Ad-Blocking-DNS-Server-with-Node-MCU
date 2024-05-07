@@ -366,7 +366,7 @@ void HandleCommand(String Command, bool execute = false){
         if(lowercaseCommand.indexOf("/d:")>-1 && lowercaseCommand.indexOf(":d\\")>-1){
             domain = Command.substring(lowercaseCommand.indexOf("/d:")+3, lowercaseCommand.indexOf(":d\\")); domain.trim();
         }
-        else if (countNoOfChars(Command, ' ')==3) {
+        else if (countNoOfChars(Command, ' ')==2) {
             domain = Command.substring(lowercaseCommand.indexOf("map remove")+strlen("map remove"));
             domain.trim();
         }
@@ -374,7 +374,7 @@ void HandleCommand(String Command, bool execute = false){
             Serial.printf("Invalid Command(%s) format, use 'help' for more info\n", Command);
         }
         if(Config["maps"].containsKey(domain)==false){
-            Serial.println("INVALID DOMAIN, No Maps found");
+            Serial.printf("INVALID DOMAIN(%s), No Maps found\n", domain);
             Serial.println("Use 'show maps' to see the mapped domains");
         }
         else{
