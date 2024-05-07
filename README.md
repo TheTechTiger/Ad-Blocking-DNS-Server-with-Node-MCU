@@ -43,8 +43,8 @@ This project implements an ad-blocking DNS server using Node MCU (ESP8266) micro
 1. Power on the Node MCU board.
 2. Monitor the serial output for debugging information (`74880` baud rate).
 3. The built-in LED indicates the device's status:
-    ON --> connected and DNS Server running
-    Blinking --> Connection to host AP failed
+    - ON --> connected and DNS Server running
+    - Blinking --> Connection to host AP failed
 4. Configure the network settings using the serial monitor(send 'help' command for detailed information)
 
 ## Troubleshooting
