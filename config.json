@@ -1,0 +1,13 @@
+{
+    "networks": [
+        { "name": "SSID", "pass": "PASSWORD", "self-AP": false },
+        { "name": "NodeMCU DNS Server", "pass": "nodeMCU1", "self-AP": true }
+    ],
+    "Extrenal-DNS": "8.8.8.8",
+    "wifi-multi-trials": 3,
+    "maps":{
+        "gateway.local": "$gateway$",
+        "node.local": "$self$"
+    },
+    "NameMAC_bindings": {}
+}

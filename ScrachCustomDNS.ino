@@ -1,11 +1,14 @@
 #include <ESP8266WiFiMulti.h>
+#include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
 #include <ArduinoJson.h>
+#include <LittleFS.h>
 
 ESP8266WiFiMulti wifiMulti;
 WiFiUDP Udp;
 
-JsonDocument Maps;
+JsonDocument Config;
+IPAddress DNSsrv;
 class cacheEntry{
     public:
     IPAddress ip;
@@ -64,14 +67,10 @@ class cacheList{
         return -1;
     }
 };
-
 // Total RAM: 4KB = 4096 bytes; Total Cache that can be allocated = 4096/size of 1 dns packet(512B) = 8 - 1(for other variables like network config and all)
-IPAddress lastUserIP(0, 0, 0, 0);
-unsigned int lastUserPort = 0;
-
-IPAddress DNSsrv(8, 8, 8, 8);
-#define BlinkForPacket 1
 cacheList cache(7, 1000);
+long ledDelay = 0, ledNow = 0;
+bool pauseDns = false;
 
 void createDnsPacket(const uint8_t *dnsBuffer, size_t bufferSize, const IPAddress &ipAddress, uint8_t *responseBuffer, size_t &responseSize){
     // Copy the transaction ID from the request to the response
@@ -226,7 +225,7 @@ String getDomainNameFromBuffer(byte packetBuffer[], int packetSize){
 }
 
 void sendPacket(IPAddress sendIp, uint16_t port, const uint8_t *buffer, size_t size, bool blinkDISABLED = false){
-    if (BlinkForPacket && !blinkDISABLED){
+    if (!blinkDISABLED){
         digitalWrite(LED_BUILTIN, HIGH);
     }
     Udp.beginPacket(sendIp, port);
@@ -237,20 +236,259 @@ void sendPacket(IPAddress sendIp, uint16_t port, const uint8_t *buffer, size_t s
     }
 }
 
+void toggleLED(){
+    if(ledNow<=millis() && ledDelay !=0){
+        digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+        ledNow += ledDelay;
+    }
+}
+
+int countNoOfChars(String str, char ch){
+    int cntr = 0;
+    for (size_t i = 0; i < str.length(); i++){
+        if(str.charAt(i)==ch){cntr++;}
+    }
+    return cntr;
+}
+
+void HandleCommand(String Command, bool execute = false){
+    if(Command.indexOf(",")> -1 && !execute){
+        String CurrentCommand = "";
+        for (int i = 0; i<Command.length(); i++){
+            if(Command.charAt(i) == ',' && CurrentCommand.charAt(CurrentCommand.length()-1)!='\\'){
+                HandleCommand(CurrentCommand, true);
+                CurrentCommand = "";
+            }
+            else{
+                CurrentCommand += Command.charAt(i);
+            }
+        }
+        if(CurrentCommand.length()>0){
+            HandleCommand(CurrentCommand);
+            CurrentCommand = "";
+        }
+        return;
+    }
+    Command.replace("\\,", ",");
+    String lowercaseCommand = Command; lowercaseCommand.toLowerCase();
+    if(lowercaseCommand.indexOf("help")> -1){
+        Serial.println("\n\nAvailable commands(Use ',' to run multiple commands at once): ");
+        Serial.println("Use \\, to use ',' as a character");
+        Serial.println("show wifi\n=>Shows all of the added WiFi networks"); //DONE
+        Serial.println("\nwifi remove /id:<ID>:id\\\n=>removes the specified WiFi network(Use WiFi Show to get the ID of the network)"); //DONE
+        Serial.println("\nwifi add /s:<SSID>:s\\ /p:<Password>:p\\\n=>Adds the given WiFi network"); //DONE
+        Serial.println("\nnode ap /s:<SSID>:s\\ /p:<Password>:p\\\n=>Sets Node MCU's AP"); 
+        Serial.println("\nmap add /d:<DOMAIN>:d\\ /ip:<IP>:ip\\\n=>Maps the domain to the specified Domain(Use $gateway$ and $ip$ to refrer to the gateway's IP and Node MCU IP respectively)"); //DONE
+        Serial.println("\nmap remove /d:<DOMAIN>:d\\\n=>Removes the mapped domain"); //DONE
+        Serial.println("\nshow map\n=>Lists all mapped domains"); //DONE
+        Serial.println("\nshow cache\n=>Prints the currently cached/pending DNS Resolve requests"); //DONE
+        Serial.println("\nshow config\n=>Prints the complete configuration"); //DONE
+        Serial.println("\nsave config\n=>Saves the configuration(use reboot to apply this saved configuration`)"); //DONE
+        Serial.println("\nreboot\n=>restarts the NodeMCU"); //DONE
+        Serial.println("\nhelp\t=>Displays this message"); //DONE
+    }
+    else if(lowercaseCommand.indexOf("show wifi")>-1){
+        Serial.println("\n\nAdded WiFi Networks: ");
+        for (int i = 0; i < Config["networks"].size(); i++){
+            Serial.println("ID: " + String(i) + " | Name: " + Config["networks"][i]["name"].as<String>() + " | Password: " + Config["networks"][i]["pass"].as<String>() + " | Self-AP: " + String(Config["networks"][i]["self-AP"].as<String>()));
+        }
+    }
+    else if (lowercaseCommand.indexOf("wifi add") > -1){
+        if(lowercaseCommand.indexOf("/s:")>-1 && lowercaseCommand.indexOf(":s\\")>-1){
+            String SSID = Command.substring(lowercaseCommand.indexOf("/s:")+3, lowercaseCommand.indexOf(":s\\"));
+            String SSIDpass = (lowercaseCommand.indexOf("/p:")+3==lowercaseCommand.indexOf(":p\\") || lowercaseCommand.indexOf("/p:")==-1) ? "" : Command.substring(lowercaseCommand.indexOf("/p:")+3, lowercaseCommand.indexOf(":p\\"));
+            Serial.print("SSID: ");
+            Serial.print(SSID);
+            Serial.print(" | Password: ");
+            Serial.println(SSIDpass==""? "(Open)":SSIDpass);
+            JsonDocument currentNetworkToAdd;
+            currentNetworkToAdd["name"] = SSID;
+            currentNetworkToAdd["pass"] = SSIDpass;
+            currentNetworkToAdd["self-AP"] = false;
+            Config["networks"].add(currentNetworkToAdd);
+            Serial.println("Network Added Successfully(Use command 'save config' and then restart node mcu for the changes to take effect)");
+        }
+        else{
+            Serial.println("Invalid Command format, use 'help' for more info");
+        }
+    }
+    else if(lowercaseCommand.indexOf("wifi remove")>-1){
+        int ID = -1;
+        if (lowercaseCommand.indexOf("/id:")>-1 && lowercaseCommand.indexOf(":id\\")>-1){
+            ID = Command.substring(lowercaseCommand.indexOf("/id:")+4, lowercaseCommand.indexOf(":id\\")).toInt();
+        }
+        else{
+            Command.replace("wifi remove", "");
+            Command.trim();
+            ID = Command.toInt();
+        }
+        if(ID<Config["networks"].size() && ID>=0){
+            if(Config["networks"][ID]["self-AP"]){
+                Serial.println("\nCannot remove Self-AP network");
+            }
+            else{
+                Serial.printf("\nNetwork(ID: %d | Name: %s | Password: %s) Removed Successfully\n", ID, Config["networks"][ID]["name"].as<String>().c_str(), Config["networks"][ID]["pass"].as<String>());
+                Config["networks"].remove(ID);
+            }
+        }
+        else{
+            Serial.println("\nInvalid ID");
+        }
+    }
+    else if (lowercaseCommand.indexOf("map add")>-1){
+        String domain, ip;
+        if(lowercaseCommand.indexOf("/d:")>-1 && lowercaseCommand.indexOf(":d\\")>-1 && lowercaseCommand.indexOf("/ip:")>-1 && lowercaseCommand.indexOf(":ip\\")>-1){
+            domain = Command.substring(lowercaseCommand.indexOf("/d:")+3, lowercaseCommand.indexOf(":d\\")), ip = Command.substring(lowercaseCommand.indexOf("/ip:")+4, lowercaseCommand.indexOf(":ip\\"));
+        }
+        else if (countNoOfChars(Command, ' ')==3) {
+            String Rdomain = Command.substring(lowercaseCommand.indexOf("map add")+strlen("map add")), domain="";
+            Rdomain.trim();
+            String ip = Rdomain;
+            for(int i=0; i<Rdomain.length(); i++){
+                if(Rdomain.charAt(i)==' '){break;}
+                domain+=Rdomain.charAt(i);
+            }
+            ip.replace(domain, ""); ip.trim();
+        }
+        else{
+            Serial.printf("Invalid Command(%s) format, use 'help' for more info\n", Command);
+            return;
+        }
+        Serial.print("Domain: ");
+        Serial.print(domain);
+        Serial.print(" | IP: ");
+        Serial.println(ip);
+        Config["maps"][domain] = ip;
+        Serial.println("Mapping Added Successfully(Use command 'save config' and then restart node mcu for the changes to take effect)");
+    }
+    else if (lowercaseCommand.indexOf("map remove")>-1){
+        String domain;
+        if(lowercaseCommand.indexOf("/d:")>-1 && lowercaseCommand.indexOf(":d\\")>-1){
+            domain = Command.substring(lowercaseCommand.indexOf("/d:")+3, lowercaseCommand.indexOf(":d\\")); domain.trim();
+        }
+        else if (countNoOfChars(Command, ' ')==3) {
+            domain = Command.substring(lowercaseCommand.indexOf("map remove")+strlen("map remove"));
+            domain.trim();
+        }
+        else{
+            Serial.printf("Invalid Command(%s) format, use 'help' for more info\n", Command);
+        }
+        if(Config["maps"].containsKey(domain)==false){
+            Serial.println("INVALID DOMAIN, No Maps found");
+            Serial.println("Use 'show maps' to see the mapped domains");
+        }
+        else{
+            Serial.print("Removing Domain: ");
+            Serial.println(domain);
+            Config["maps"].remove(domain);
+        }
+    }
+    else if(lowercaseCommand.indexOf("show map")>-1){
+        Serial.println("\n\nMapped domains and their IP address: ");
+        serializeJsonPretty(Config["maps"], Serial);
+        Serial.println();
+    }
+    else if(lowercaseCommand.indexOf("show cache")>-1){
+        Serial.println("\n\nCached/Pending DNS Resolve Requests: ");
+        Serial.print("Current Time(ms): ");
+        Serial.println(millis());
+        for(int i=0; i<7; i++){
+            Serial.printf("Index: %d | RequestFrom: %s:%d | RequestTime: %d | Expired: %s\n", i, cache.entries[i].ip.toString().c_str(), cache.entries[i].port, cache.entries[i].requestTime, cache.entries[i].expired ? "true":"false");
+        }
+    }
+    else if(lowercaseCommand.indexOf("show config")>-1){
+        serializeJsonPretty(Config, Serial);
+        Serial.println();
+    }
+    else if(lowercaseCommand.indexOf("save config")>-1){
+        File configFile = LittleFS.open("/config.json", "w");
+        serializeJson(Config, configFile);
+        configFile.close();
+        Serial.println("Configuration Saved Successfully");
+    }
+    else if(lowercaseCommand.indexOf("reboot")>-1){
+        Serial.println("Restarting NodeMCU");
+        ESP.restart();
+    }
+    else{
+        Serial.printf("Invalid command: '%s', Use help to see available commands\n", Command);
+    }
+}
+
 void setup(){
     Serial.begin(74880);
-    delay(100);
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, HIGH); // turns LED Off
-    Serial.println("\nProgram Started "); //DEBUG 1
-
-    wifiMulti.addAP("SSID", "PASS");
-    while (wifiMulti.run() != WL_CONNECTED){
-        delay(100);
+    Serial.println("\nProgram Started"); //DEBUG 1
+    Serial.println("Performing inititialization"); //DEBUG 1
+    if (!LittleFS.begin()) {
+        Serial.println("LittleFS mount failed"); //DEBUG 1
+        Serial.println("Running off of Default Configuration"); //DEBUG 2
+        deserializeJson(Config, "{\"networks\": [{ \"name\": \"NodeMCU DNS Server\", \"pass\": \"nodeMCU1\", \"self-AP\": true }],\"Extrenal-DNS\": \"8.8.8.8\",\"wifi-multi-trials\": 3,\"maps\":{\"gateway.local\": \"$gateway$\",\"node.local\": \"$self$\"},\"NameMAC_bindings\": {}}");
     }
+    else{
+        if(LittleFS.exists("/config.json")){
+            File configFile = LittleFS.open("/config.json", "r");
+            DeserializationError err = deserializeJson(Config, configFile);
+            configFile.close();
+            Serial.println("Previous configuration loaded successfully");
+        }
+        else{
+            deserializeJson(Config, "{\"networks\": [{ \"name\": \"NodeMCU DNS Server\", \"pass\": \"nodeMCU1\", \"self-AP\": true }],\"Extrenal-DNS\": \"8.8.8.8\",\"wifi-multi-trials\": 3,\"maps\":{\"gateway.local\": \"$gateway$\",\"node.local\": \"$self$\"},\"NameMAC_bindings\": {}}");
+            File configFile = LittleFS.open("/config.json", "w");
+            serializeJson(Config, configFile);
+            configFile.close();
+            Serial.println("Default Configuration saved Successfully");
+        }
+    }
+    DNSsrv.fromString(Config["Extrenal-DNS"].as<String>());
+    Serial.print("Final Configuration for this session: ");
+    serializeJsonPretty(Config, Serial);
+    Serial.println();
 
-    Maps["router.local"] = WiFi.gatewayIP().toString();
-    Maps["node.local"] = WiFi.localIP().toString();
+    bool NetworksAdded = false;
+    JsonDocument SelfAP;
+    for(JsonVariant cur : Config["networks"].as<JsonArray>()){
+        if(!cur["self-AP"]){
+            NetworksAdded = true;
+            wifiMulti.addAP(cur["name"].as<const char*>(), cur["pass"].as<const char*>());
+        }
+        else{
+            SelfAP = cur;
+        }
+    }
+    if (NetworksAdded){
+        int currentTrial = 1;
+        while (wifiMulti.run() != WL_CONNECTED && currentTrial <= Config["wifi-multi-trials"]){
+            Serial.printf("Trying %d times out of %d\n", currentTrial, Config["wifi-multi-trials"].as<int>());
+            currentTrial++;
+        }
+        if(currentTrial > Config["wifi-multi-trials"]){
+            NetworksAdded = false;
+            Serial.println("Network cannot be connected");
+        }
+    }
+    if(!NetworksAdded){
+        Serial.print("Connection to a host AP failed, Use Serial monitor to configure your network settings. For more help use: help");
+        // Serial.print("Connection to a host AP failed, connect to NodeMCU's AP or Use Serial monitor to configure your network settings\nSSID: ");
+        // Serial.print(SelfAP["name"].as<const char *>());
+        // Serial.print(" | Password: ");
+        // Serial.println(SelfAP["pass"].as<const char *>());
+
+        // WiFi.mode(WIFI_AP_STA);
+        // WiFi.softAPConfig(IPAddress(192, 168, 1, 1), IPAddress(192, 168, 1, 1), IPAddress(255, 255, 255, 0));
+        // WiFi.softAP(SelfAP["name"].as<const char *>(), SelfAP["pass"].as<const char *>());
+        // use the serial monitor or the AP to configure network settings and when connected successfully resume the script
+        bool paused = true;
+        ledDelay = 500;
+        while (paused){
+            toggleLED();
+            if (Serial.available()>0){
+                String cmd = Serial.readString();cmd.trim();cmd.replace("\n", "");
+                HandleCommand(cmd);
+            }
+        }
+    }
 
     Serial.println("Connected to: " + WiFi.SSID() + " | IP: " + WiFi.localIP().toString()); //DEBUG 1
     Udp.begin(53);
@@ -260,7 +498,7 @@ void setup(){
 
 void loop(){
     int packetSize = Udp.parsePacket();
-    if (packetSize){
+    if (packetSize && !pauseDns){
         Serial.printf("\n\nReceived %d bytes from %s, port %d\n", packetSize, Udp.remoteIP().toString().c_str(), Udp.remotePort()); //DEBUG 2
         byte packetBuffer[packetSize];
         Udp.read(packetBuffer, packetSize);
@@ -278,10 +516,7 @@ void loop(){
             }
         }
         else if (packetBuffer[2] == 0x01 && packetBuffer[3] == 0x00){
-            Serial.println("DNS query packet from a user received"); //DEBUG 3
-            lastUserIP = Udp.remoteIP();
-            lastUserPort = Udp.remotePort();
-            
+            Serial.println("DNS query packet from a user received"); //DEBUG 3            
             String domainName = getDomainNameFromBuffer(packetBuffer, packetSize);
             Serial.println("Domain Name: " + domainName); //DEBUG 2
             if (domainName.indexOf("in-addr.arpa") > -1)
@@ -289,8 +524,11 @@ void loop(){
                 Serial.println("Reverse DNS lookup for " + domainName); //DEBUG 2
                 String ipToresolve = getIPfromRDR(domainName);
                 String resolvedDomain = "";
-                for (JsonPair pair : Maps.as<JsonObject>()){
-                    if (pair.value() == ipToresolve){
+                for (JsonPair pair : Config["maps"].as<JsonObject>()){
+                    String IPFromMaps = pair.value();
+                    IPFromMaps.replace("$gateway$", WiFi.gatewayIP().toString());
+                    IPFromMaps.replace("$self$", WiFi.localIP().toString());
+                    if (IPFromMaps == ipToresolve){
                         resolvedDomain = pair.key().c_str();
                         break;
                     }
@@ -310,8 +548,14 @@ void loop(){
                     }
                 }
             }
-            else if (Maps.containsKey(domainName)){
-                String responseIP = Maps[domainName];
+            else if (Config["maps"].containsKey(domainName)){
+                String responseIP = Config["maps"][domainName];
+                if(responseIP.indexOf("$gateway$")>-1){
+                    responseIP.replace("$gateway$", WiFi.gatewayIP().toString());
+                }
+                if(responseIP.indexOf("$self$")>-1){
+                    responseIP.replace("$self$", WiFi.localIP().toString());
+                }
                 IPAddress ResponseIP;
                 ResponseIP.fromString(responseIP);
                 uint8_t dnsResponseBuffer[512];
@@ -335,4 +579,9 @@ void loop(){
             Serial.println("Non-DNS query packet received, ignoring."); //DEBUG 2
         }
     }
+    if (Serial.available()>0){
+        String cmd = Serial.readString();cmd.trim();cmd.replace("\n", "");
+        HandleCommand(cmd);
+    }
+    
 }
